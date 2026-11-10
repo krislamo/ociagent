@@ -1,0 +1,26 @@
+services:
+  claude:
+    build:
+      context: .
+      args:
+        UID: ${OCIAGENT_UID:-1000}
+        GID: ${OCIAGENT_GID:-1000}
+    image: localhost/claude-code:latest
+    userns_mode: keep-id:uid=${OCIAGENT_UID:-1000},gid=${OCIAGENT_GID:-1000}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+      - unmask=/proc/*
+    stdin_open: true
+    tty: true
+    working_dir: /${PROJECT:-workspaces}
+    environment:
+      TZ: ${TZ:-America/New_York}
+      DISABLE_AUTOUPDATER: "1"
+    volumes:
+      - ${WORKSPACE:-./workspaces}:/${PROJECT:-workspaces}
+      - ${NOTES:-./notes}:/notes
+      - ${CONFIG:-./config}:/home/claude/.config/claude
+      - ${CLAUDE_MD:-./CLAUDE.md}:/home/claude/.config/claude/CLAUDE.md:ro
+      - ${MANAGED_SETTINGS_D:-./managed-settings.d}:/etc/claude-code/managed-settings.d:ro

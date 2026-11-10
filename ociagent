@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+protect=(
+	'*.code-workspace'
+	.devcontainer
+	.envrc
+	.git
+	.idea
+	.venv
+	venv
+	.vscode
+)
+
+for cmd in find mktemp realpath; do
+	if ! command -v "$cmd" >/dev/null; then
+		printf '%s not found\n' "$cmd" >&2
+		exit 1
+	fi
+done
+
+if command -v docker >/dev/null; then
+	ocicmd=(docker compose)
+elif command -v podman >/dev/null; then
+	ocicmd=(podman compose)
+else
+	printf 'docker or podman not found\n' >&2
+	exit 1
+fi
+
+if [[ ! -f docker-compose.yml ]]; then
+	printf 'run from the ociagent repo root\n' >&2
+	exit 1
+fi
+
+if [[ -f .env ]]; then
+	# shellcheck source=/dev/null
+	source ./.env || exit
+fi
+
+if [[ -n $OCIAGENT_PROTECT ]]; then
+	read -ra protect <<<"$OCIAGENT_PROTECT"
+fi
+
+if ((${#protect[@]} == 0)); then
+	printf 'no protected paths configured\n' >&2
+	exit 1
+fi
+
+if [[ ! -f ${CLAUDE_MD:-CLAUDE.md} ]]; then
+	printf '%s: not a file\n' "${CLAUDE_MD:-CLAUDE.md}" >&2
+	exit 1
+fi
+
+if [[ ! -d ${MANAGED_SETTINGS_D:-managed-settings.d} ]]; then
+	printf '%s: not a directory\n' \
+		"${MANAGED_SETTINGS_D:-managed-settings.d}" >&2
+	exit 1
+fi
+
+name=${1%/}
+name=${name#./}
+name=${name#workspaces/}
+if [[ -z $name || $name == -* ]]; then
+	printf 'usage: %s <project> [claude args]\n' "${0##*/}" >&2
+	exit 1
+fi
+shift
+
+case $name in
+*/* | .* | bin | boot | dev | etc | home | lib | lib64 | media | mnt | \
+	notes | opt | proc | root | run | sbin | srv | sys | tmp | usr | var | \
+	workspaces)
+	printf '%s: not allowed as a project name\n' "$name" >&2
+	exit 1
+	;;
+esac
+
+ws=$(realpath "workspaces/$name") || exit
+if [[ ! -d $ws ]]; then
+	printf '%s: not a directory\n' "$ws" >&2
+	exit 1
+fi
+
+mkdir -p "notes/$name" || exit
+
+names=()
+for p in "${protect[@]}"; do
+	if [[ $p == */* ]]; then
+		printf '%s: not a name (contains /)\n' "$p" >&2
+		exit 1
+	fi
+	names+=(-o -name "$p")
+done
+mapfile -d '' paths < <(
+	find "$ws" -mindepth 1 \( "${names[@]:1}" \) -prune -print0
+) || exit
+wait $! || exit
+
+for p in "${paths[@]}"; do
+	if [[ -L $p ]]; then
+		printf '%q: protected path is a symlink\n' "$p" >&2
+		exit 1
+	fi
+	if [[ $p == *[\'\$]* || $p == *[$'\n\r']* ]]; then
+		printf '%q: unsafe character in protected path\n' "$p" >&2
+		exit 1
+	fi
+done
+
+files=(-f docker-compose.yml)
+if ((${#paths[@]})); then
+	override=$(mktemp) || exit
+	trap 'rm -f "$override"' EXIT
+	files+=(-f "$override")
+	{
+		printf '%s\n' 'services:' '  claude:' '    volumes:'
+		for p in "${paths[@]}"; do
+			printf '%s\n' \
+				'      - type: bind' \
+				"        source: '$p'" \
+				"        target: '/$name${p#"$ws"}'" \
+				'        read_only: true'
+		done
+	} >"$override" || exit
+fi
+
+WORKSPACE=$ws PROJECT=$name NOTES=./notes/$name \
+	"${ocicmd[@]}" "${files[@]}" run --rm claude "$@"
