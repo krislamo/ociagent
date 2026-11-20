@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+prog=${0##*/}
+
+fatal() {
+	printf '%s: %s\n' "$prog" "$*" >&2
+	exit 1
+}
+
+IFS=: read -ra protected <<<"$OCIAGENT_PROTECTED"
+
+if ((EUID == 0)); then
+	if [[ -z $OCIAGENT_UID || -z $OCIAGENT_GID ]]; then
+		fatal 'OCIAGENT_UID and OCIAGENT_GID are not set'
+	fi
+	# remount ro so claude's sandbox see them as read-only
+	for path in "${protected[@]}"; do
+		if ! mount --bind -o ro "$path" "$path"; then
+			echo "can't mount protected path read-only: ${path@Q}"
+		fi
+	done
+	exec setpriv --reuid="$OCIAGENT_UID" --regid="$OCIAGENT_GID" \
+		--init-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
+		"$0" "$@"
+fi
+
+if [[ $OCIAGENT_KRUN != 0 ]]; then
+	read -r cmdline </proc/cmdline
+	if [[ " $cmdline " != *' init=/init.krun '* ]]; then
+		fatal 'not in a microVM'
+	fi
+fi
+
+for path in "${protected[@]}"; do
+	if [[ -d $path ]]; then
+		if probe=$(mktemp -p "$path" 2>/dev/null); then
+			rm -f "$probe"
+			fatal "protected path is writable: ${path@Q}"
+		fi
+	elif [[ -f $path ]] && { : >>"$path"; } 2>/dev/null; then
+		fatal "protected path is writable: ${path@Q}"
+	fi
+done
+
+if ! bwrap --ro-bind / / true; then
+	fatal 'bubblewrap failed'
+fi
+
+exec "$@"

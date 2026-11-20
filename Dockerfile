@@ -30,10 +30,13 @@ COPY managed-settings.json /etc/claude-code/managed-settings.json
 RUN chmod 755 /etc/claude-code \
  && chmod 644 /etc/claude-code/managed-settings.json
 
+COPY --chmod=755 ociagent-init /usr/local/bin/ociagent-init
+
 ENV LANG=C.UTF-8
 
 ARG UID=1000
 ARG GID=1000
+ENV OCIAGENT_UID=${UID} OCIAGENT_GID=${GID}
 
 RUN groupadd -g ${GID} claude \
  && useradd -m -u ${UID} -g ${GID} -s /bin/bash claude
@@ -44,4 +47,4 @@ ENV CLAUDE_CONFIG_DIR=/home/claude/.config/claude
 RUN mkdir -p /home/claude/.config/claude
 
 WORKDIR /workspaces
-ENTRYPOINT ["claude"]
+ENTRYPOINT ["/usr/local/bin/ociagent-init", "claude"]

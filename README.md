@@ -1,9 +1,13 @@
 # ociagent
 
-Claude Code in a Debian slim image under rootless Podman, running as
-user `claude`. The agent is isolated in a container and can write only to its
-own project. Paths that run code on the host and usually sit outside git history
-(`.git`, virtualenvs, etc.) are mounted read-only.
+Claude Code in a Debian slim image under rootless Podman, running as user
+`claude`. The agent can write only to its own project. Paths that run code on
+the host and usually sit outside git history (`.git`, virtualenvs, etc.) are
+mounted read-only.
+
+By default, each session runs in a libkrun microVM with its own kernel. The
+container's files and mounts reach the guest over virtiofs, and the host keeps
+enforcing the read-only paths. `OCIAGENT_KRUN=0` runs a plain container instead.
 
 ## Requirements
 
@@ -21,17 +25,23 @@ The compose file uses Podman-only options:
 - `userns_mode: keep-id`
 - `unmask=/proc/*`
 
+The microVM needs crun built with libkrun (`podman info` shows `+LIBKRUN`) and a
+usable `/dev/kvm`.
+
 ## .env config
 
-| Variable             | Default                | Purpose                              |
-| -------------------- | ---------------------- | ------------------------------------ |
-| `CONFIG`             | `./config`             | Claude's config and credentials      |
-| `CLAUDE_MD`          | `./CLAUDE.md`          | Claude's user CLAUDE.md              |
-| `MANAGED_SETTINGS_D` | `./managed-settings.d` | Managed-settings drop-ins, read-only |
-| `OCIAGENT_PROTECT`   | see below              | Names mounted read-only              |
-| `TZ`                 | `America/New_York`     | Container time zone                  |
-| `OCIAGENT_UID`       | `1000`                 | Container UID, rebuild to change     |
-| `OCIAGENT_GID`       | `1000`                 | Container GID, rebuild to change     |
+| Variable                | Default                | Purpose                              |
+| ----------------------- | ---------------------- | ------------------------------------ |
+| `CONFIG`                | `./config`             | Claude's config and credentials      |
+| `CLAUDE_MD`             | `./CLAUDE.md`          | Claude's user CLAUDE.md              |
+| `MANAGED_SETTINGS_D`    | `./managed-settings.d` | Managed-settings drop-ins, read-only |
+| `OCIAGENT_PROTECT`      | see below              | Names mounted read-only              |
+| `TZ`                    | `America/New_York`     | Container time zone                  |
+| `OCIAGENT_UID`          | `1000`                 | Container UID, rebuild to change     |
+| `OCIAGENT_GID`          | `1000`                 | Container GID, rebuild to change     |
+| `OCIAGENT_KRUN`         | `1`                    | `0` runs without the microVM         |
+| `OCIAGENT_KRUN_CPUS`    | `2`                    | microVM vCPUs                        |
+| `OCIAGENT_KRUN_RAM_MIB` | `2048`                 | microVM RAM in MiB                   |
 
 **Note:** `ociagent` sources `.env` as bash, so **quote values with spaces**:
 `OCIAGENT_PROTECT='.git .env'`. Left unquoted, the rest of the line runs as a
@@ -118,8 +128,8 @@ Limits of the protection:
 - A match at the top of the project can't be moved. A nested one can be
   sidestepped by renaming a directory above it, so treat nested protection as
   best effort
-- `docker compose run --rm claude` still works, but mounts all of `./workspaces`
-  at `/workspaces` without protections
+- `docker compose run --rm -e OCIAGENT_KRUN=0 claude` still works, but mounts
+  all of `./workspaces` at `/workspaces` without protections or the microVM
 
 ### Update
 

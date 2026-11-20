@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+prog=${0##*/}
+
+fatal() {
+	printf '%s: %s\n' "$prog" "$*" >&2
+	exit 1
+}
+
 protect=(
 	'*.code-workspace'
 	.devcontainer
@@ -13,8 +20,7 @@ protect=(
 
 for cmd in find mktemp realpath; do
 	if ! command -v "$cmd" >/dev/null; then
-		printf '%s not found\n' "$cmd" >&2
-		exit 1
+		fatal "command not found: ${cmd@Q}"
 	fi
 done
 
@@ -23,13 +29,11 @@ if command -v docker >/dev/null; then
 elif command -v podman >/dev/null; then
 	ocicmd=(podman compose)
 else
-	printf 'docker or podman not found\n' >&2
-	exit 1
+	fatal 'docker or podman not found'
 fi
 
 if [[ ! -f docker-compose.yml ]]; then
-	printf 'run from the ociagent repo root\n' >&2
-	exit 1
+	fatal 'run from the ociagent repo root'
 fi
 
 if [[ -f .env ]]; then
@@ -37,32 +41,55 @@ if [[ -f .env ]]; then
 	source ./.env || exit
 fi
 
+krun=${OCIAGENT_KRUN:-1}
+cpus=${OCIAGENT_KRUN_CPUS:-2}
+ram=${OCIAGENT_KRUN_RAM_MIB:-2048}
+
 if [[ -n $OCIAGENT_PROTECT ]]; then
 	read -ra protect <<<"$OCIAGENT_PROTECT"
 fi
 
+if [[ $krun != 0 ]]; then
+	krun=1
+	if [[ $cpus == *[!0-9]* || $cpus == 0* ]]; then
+		fatal "OCIAGENT_KRUN_CPUS is not a number: ${cpus@Q}"
+	fi
+	if [[ $ram == *[!0-9]* || $ram == 0* ]]; then
+		fatal "OCIAGENT_KRUN_RAM_MIB is not a number: ${ram@Q}"
+	fi
+	if ! command -v podman >/dev/null; then
+		fatal "command not found: 'podman'"
+	fi
+	runtime=$(podman info --format '{{.Host.OCIRuntime.Version}}') || exit
+	if [[ $runtime != *+LIBKRUN* ]]; then
+		fatal 'crun has no libkrun.' \
+			'OCIAGENT_KRUN=0 runs without the microVM (less isolation)'
+	fi
+	if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+		fatal '/dev/kvm is not usable.' \
+			'OCIAGENT_KRUN=0 runs without the microVM (less isolation)'
+	fi
+fi
+
 if ((${#protect[@]} == 0)); then
-	printf 'no protected paths configured\n' >&2
-	exit 1
+	fatal 'no protected paths configured'
 fi
 
-if [[ ! -f ${CLAUDE_MD:-CLAUDE.md} ]]; then
-	printf '%s: not a file\n' "${CLAUDE_MD:-CLAUDE.md}" >&2
-	exit 1
+md=${CLAUDE_MD:-CLAUDE.md}
+if [[ ! -f $md ]]; then
+	fatal "CLAUDE_MD is not a file: ${md@Q}"
 fi
 
-if [[ ! -d ${MANAGED_SETTINGS_D:-managed-settings.d} ]]; then
-	printf '%s: not a directory\n' \
-		"${MANAGED_SETTINGS_D:-managed-settings.d}" >&2
-	exit 1
+settings=${MANAGED_SETTINGS_D:-managed-settings.d}
+if [[ ! -d $settings ]]; then
+	fatal "MANAGED_SETTINGS_D is not a directory: ${settings@Q}"
 fi
 
 name=${1%/}
 name=${name#./}
 name=${name#workspaces/}
 if [[ -z $name || $name == -* ]]; then
-	printf 'usage: %s <project> [claude args]\n' "${0##*/}" >&2
-	exit 1
+	fatal 'usage: <project> [claude args]'
 fi
 shift
 
@@ -70,15 +97,13 @@ case $name in
 */* | .* | bin | boot | dev | etc | home | lib | lib64 | media | mnt | \
 	notes | opt | proc | root | run | sbin | srv | sys | tmp | usr | var | \
 	workspaces)
-	printf '%s: not allowed as a project name\n' "$name" >&2
-	exit 1
+	fatal "project name not allowed: ${name@Q}"
 	;;
 esac
 
 ws=$(realpath "workspaces/$name") || exit
 if [[ ! -d $ws ]]; then
-	printf '%s: not a directory\n' "$ws" >&2
-	exit 1
+	fatal "project is not a directory: ${ws@Q}"
 fi
 
 mkdir -p "notes/$name" || exit
@@ -86,8 +111,7 @@ mkdir -p "notes/$name" || exit
 names=()
 for p in "${protect[@]}"; do
 	if [[ $p == */* ]]; then
-		printf '%s: not a name (contains /)\n' "$p" >&2
-		exit 1
+		fatal "OCIAGENT_PROTECT entry contains /: ${p@Q}"
 	fi
 	names+=(-o -name "$p")
 done
@@ -98,22 +122,32 @@ wait $! || exit
 
 for p in "${paths[@]}"; do
 	if [[ -L $p ]]; then
-		printf '%q: protected path is a symlink\n' "$p" >&2
-		exit 1
+		fatal "protected path is a symlink: ${p@Q}"
 	fi
-	if [[ $p == *[\'\$]* || $p == *[$'\n\r']* ]]; then
-		printf '%q: unsafe character in protected path\n' "$p" >&2
-		exit 1
+	if [[ $p == *[\'\$:]* || $p == *[$'\n\r']* ]]; then
+		fatal "protected path has an unsafe character: ${p@Q}"
 	fi
 done
 
-files=(-f docker-compose.yml)
-if ((${#paths[@]})); then
-	override=$(mktemp) || exit
-	trap 'rm -f "$override"' EXIT
-	files+=(-f "$override")
-	{
-		printf '%s\n' 'services:' '  claude:' '    volumes:'
+override=$(mktemp) || exit
+trap 'rm -f "$override"' EXIT
+{
+	printf '%s\n' 'services:' '  claude:'
+	if ((krun)); then
+		printf '%s\n' \
+			'    annotations:' \
+			'      run.oci.handler: krun' \
+			"      krun.cpus: '$cpus'" \
+			"      krun.ram_mib: '$ram'"
+	fi
+	printf '%s\n' '    environment:' "      OCIAGENT_KRUN: '$krun'"
+	if ((${#paths[@]})); then
+		protected=
+		for p in "${paths[@]}"; do
+			protected+=:/$name${p#"$ws"}
+		done
+		printf "      OCIAGENT_PROTECTED: '%s'\n" "${protected#:}"
+		printf '%s\n' '    volumes:'
 		for p in "${paths[@]}"; do
 			printf '%s\n' \
 				'      - type: bind' \
@@ -121,8 +155,26 @@ if ((${#paths[@]})); then
 				"        target: '/$name${p#"$ws"}'" \
 				'        read_only: true'
 		done
-	} >"$override" || exit
+	fi
+} >"$override" || exit
+
+files=(-f docker-compose.yml -f "$override")
+container=ociagent-$$
+
+# turn off icrnl on podman's container pty so enter reaches claude as \r
+if ((krun)) && [[ -t 0 ]]; then
+	{
+		for _ in {1..150}; do
+			sleep 0.2
+			pid=$("${ocicmd[0]}" inspect --format '{{.State.Pid}}' \
+				"$container" 2>/dev/null)
+			if [[ $pid == [1-9]* ]] &&
+				stty -F "/proc/$pid/fd/0" -icrnl 2>/dev/null; then
+				break
+			fi
+		done
+	} &
 fi
 
 WORKSPACE=$ws PROJECT=$name NOTES=./notes/$name \
-	"${ocicmd[@]}" "${files[@]}" run --rm claude "$@"
+	"${ocicmd[@]}" "${files[@]}" run --rm --name "$container" claude "$@"
