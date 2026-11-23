@@ -17,7 +17,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /claude-code.asc /etc/apt/keyrings/claude-code.asc
-COPY claude-code.sources /etc/apt/sources.list.d/claude-code.sources
+COPY claude/claude-code.sources /etc/apt/sources.list.d/claude-code.sources
 
 RUN apt-get update \
  && apt-get dist-upgrade -y \
@@ -26,11 +26,11 @@ RUN apt-get update \
       shellcheck shfmt socat tzdata \
  && rm -rf /var/lib/apt/lists/*
 
-COPY managed-settings.json /etc/claude-code/managed-settings.json
+COPY claude/managed-settings.json /etc/claude-code/managed-settings.json
 RUN chmod 755 /etc/claude-code \
  && chmod 644 /etc/claude-code/managed-settings.json
 
-COPY --chmod=755 ociagent-init /usr/local/bin/ociagent-init
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/ociagent-init
 
 ENV LANG=C.UTF-8
 

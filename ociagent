@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+VERSION='0.0.1'
 prog=${0##*/}
 
 fatal() {
@@ -7,21 +8,37 @@ fatal() {
 	exit 1
 }
 
-protect=(
-	'*.code-workspace'
-	.devcontainer
-	.envrc
-	.git
-	.idea
-	.venv
-	venv
-	.vscode
-)
+help() {
+	printf 'Usage: %s %s\n' "$prog" \
+		'-a {claude|codex} [OPTIONS] [-- AGENT_ARGS...]'
+	printf '  %-22s  %s\n' \
+		'-a, --agent AGENT' 'agent to run (claude or codex, required)' \
+		'-c, --cpus CPUS' 'microVM vCPUs (default: 2, requires krun)' \
+		'-h, --help' 'help text' \
+		'-i, --insecure' 'plain container (less isolation)' \
+		'-n, --notes PATH' 'notes directory mounted at /notes' \
+		'-p, --protect PATTERNS' 'replacement read-only patterns (quoted list)' \
+		'-r, --ram MIB' 'microVM RAM (default: 2048, requires krun)' \
+		'-v, --version' 'launcher version' \
+		'-w, --workspace PATH' 'workspace path (default: current directory)' \
+		'-- AGENT_ARGS...' 'arguments passed to the agent'
+}
 
-for cmd in find mktemp realpath; do
-	if ! command -v "$cmd" >/dev/null; then
-		fatal "command not found: ${cmd@Q}"
+option_value_missing() {
+	if (($# < 2)); then
+		return 0
 	fi
+
+	local value=$2
+	if [[ -z $value || $value == -* ]]; then
+		return 0
+	fi
+
+	return 1
+}
+
+for cmd in find mkdir mktemp realpath rm; do
+	command -v "$cmd" >/dev/null || fatal "command not found: ${cmd@Q}"
 done
 
 if command -v docker >/dev/null; then
@@ -32,91 +49,191 @@ else
 	fatal 'docker or podman not found'
 fi
 
-if [[ ! -f docker-compose.yml ]]; then
-	fatal 'run from the ociagent repo root'
-fi
+launcher=$(realpath -e -- "${BASH_SOURCE[0]}") || exit
+install=${launcher%/*}
+compose_file=$install/docker-compose.yml
+[[ -f $compose_file ]] || fatal "${compose_file@Q} missing"
+[[ -r $compose_file ]] || fatal "${compose_file@Q} is not readable"
 
-if [[ -f .env ]]; then
-	# shellcheck source=/dev/null
-	source ./.env || exit
-fi
+agent=
+cpus=
+krun=1
+notes=
+ram=
+workspace_arg=.
 
-krun=${OCIAGENT_KRUN:-1}
-cpus=${OCIAGENT_KRUN_CPUS:-2}
-ram=${OCIAGENT_KRUN_RAM_MIB:-2048}
+protect=(
+	'*.code-workspace'
+	.devcontainer
+	.envrc
+	.git
+	.idea
+	.venv
+	.vscode
+	venv
+)
 
-if [[ -n $OCIAGENT_PROTECT ]]; then
-	read -ra protect <<<"$OCIAGENT_PROTECT"
-fi
+while (($#)); do
+	case $1 in
+	-a | --agent)
+		if option_value_missing "$@"; then
+			fatal "$1 requires claude or codex"
+		fi
+		agent=$2
+		shift 2
+		;;
+	-c | --cpus)
+		if option_value_missing "$@"; then
+			fatal "$1 requires a count"
+		fi
+		[[ $2 =~ ^[1-9][0-9]*$ ]] || fatal "invalid CPU count: ${2@Q}"
+		cpus=$2
+		shift 2
+		;;
+	-h | --help)
+		help
+		exit
+		;;
+	-i | --insecure)
+		krun=0
+		shift
+		;;
+	-n | --notes)
+		if option_value_missing "$@"; then
+			fatal "$1 requires a path"
+		fi
+		notes=$2
+		shift 2
+		;;
+	-p | --protect)
+		if option_value_missing "$@"; then
+			fatal "$1 requires a list of patterns"
+		fi
+		if [[ $2 == *[$'\n\r']* ]]; then
+			fatal "$1 requires patterns on one line"
+		fi
+		read -ra protect <<<"$2"
+		shift 2
+		;;
+	-r | --ram)
+		if option_value_missing "$@"; then
+			fatal "$1 requires MiB"
+		fi
+		[[ $2 =~ ^[1-9][0-9]*$ ]] || fatal "invalid RAM size: ${2@Q}"
+		ram=$2
+		shift 2
+		;;
+	-v | --version)
+		printf '%s %s\n' "$prog" "$VERSION"
+		exit
+		;;
+	-w | --workspace)
+		if option_value_missing "$@"; then
+			fatal "$1 requires a path"
+		fi
+		workspace_arg=$2
+		shift 2
+		;;
+	--)
+		shift
+		break
+		;;
+	*)
+		fatal "unexpected argument: ${1@Q} (pass agent arguments after --)"
+		;;
+	esac
+done
 
-if [[ $krun != 0 ]]; then
-	krun=1
-	if [[ $cpus == *[!0-9]* || $cpus == 0* ]]; then
-		fatal "OCIAGENT_KRUN_CPUS is not a number: ${cpus@Q}"
-	fi
-	if [[ $ram == *[!0-9]* || $ram == 0* ]]; then
-		fatal "OCIAGENT_KRUN_RAM_MIB is not a number: ${ram@Q}"
-	fi
-	if ! command -v podman >/dev/null; then
-		fatal "command not found: 'podman'"
-	fi
-	runtime=$(podman info --format '{{.Host.OCIRuntime.Version}}') || exit
-	if [[ $runtime != *+LIBKRUN* ]]; then
-		fatal 'crun has no libkrun.' \
-			'OCIAGENT_KRUN=0 runs without the microVM (less isolation)'
-	fi
-	if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-		fatal '/dev/kvm is not usable.' \
-			'OCIAGENT_KRUN=0 runs without the microVM (less isolation)'
-	fi
+case $agent in
+claude | codex) ;;
+'') fatal "specify -a or --agent with 'claude' or 'codex'" ;;
+*) fatal "unknown agent: ${agent@Q} (expected claude or codex)" ;;
+esac
+
+if ((!krun)) && [[ -n $cpus || -n $ram ]]; then
+	fatal 'CPU and RAM sizing requires krun'
 fi
 
 if ((${#protect[@]} == 0)); then
 	fatal 'no protected paths configured'
 fi
+names=()
+for p in "${protect[@]}"; do
+	[[ $p != */* ]] || fatal "protect pattern contains /: ${p@Q}"
+	names+=(-o -name "$p")
+done
 
-md=${CLAUDE_MD:-CLAUDE.md}
-if [[ ! -f $md ]]; then
-	fatal "CLAUDE_MD is not a file: ${md@Q}"
+# Use a NUL delimiter to preserve paths that end in a newline.
+IFS= read -r -d '' workspace < <(
+	realpath -ez -- "$workspace_arg"
+) || exit
+
+[[ -d $workspace ]] || fatal "workspace is not a directory: ${workspace@Q}"
+[[ $workspace != / ]] || fatal 'workspace cannot be /'
+[[ $install/ != "$workspace/"* ]] || fatal 'workspace contains the install'
+if [[ $workspace == "$install/"* && $workspace != "$install/workspaces/"* ]]; then
+	fatal 'choose a workspace subdirectory of workspaces/'
 fi
 
-settings=${MANAGED_SETTINGS_D:-managed-settings.d}
-if [[ ! -d $settings ]]; then
-	fatal "MANAGED_SETTINGS_D is not a directory: ${settings@Q}"
+if [[ -n $notes ]]; then
+	IFS= read -r -d '' notes < <(realpath -mz -- "$notes") || exit
 fi
 
-name=${1%/}
-name=${name#./}
-name=${name#workspaces/}
-if [[ -z $name || $name == -* ]]; then
-	fatal 'usage: <project> [claude args]'
-fi
-shift
+cd -- "$install" || exit
 
+name=${workspace##*/}
+project=$name
 case $name in
-*/* | .* | bin | boot | dev | etc | home | lib | lib64 | media | mnt | \
-	notes | opt | proc | root | run | sbin | srv | sys | tmp | usr | var | \
-	workspaces)
-	fatal "project name not allowed: ${name@Q}"
+bin | boot | dev | etc | home | lib | lib64 | media | mnt | notes | opt | \
+	proc | root | run | sbin | srv | sys | tmp | usr | var | workspaces)
+	project=workspaces/$name
 	;;
 esac
 
-ws=$(realpath "workspaces/$name") || exit
-if [[ ! -d $ws ]]; then
-	fatal "project is not a directory: ${ws@Q}"
+if [[ -z $notes ]]; then
+	IFS= read -r -d '' notes < <(
+		realpath -mz -- "$install/notes/$name"
+	) || exit
 fi
 
-mkdir -p "notes/$name" || exit
+[[ $notes != / ]] || fatal 'notes cannot be /'
+[[ $install/ != "$notes/"* ]] || fatal 'notes path contains the install'
+if [[ $notes/ == "$install/"* && $notes != "$install/notes/"* ]]; then
+	fatal 'choose a notes subdirectory of notes/'
+fi
+[[ $notes/ != "$workspace/"* ]] || fatal 'notes must be outside the workspace'
+[[ $workspace/ != "$notes/"* ]] || fatal 'notes path contains the workspace'
 
-names=()
-for p in "${protect[@]}"; do
-	if [[ $p == */* ]]; then
-		fatal "OCIAGENT_PROTECT entry contains /: ${p@Q}"
+if ((krun)); then
+	command -v podman >/dev/null || fatal "command not found: 'podman'"
+	if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+		fatal '/dev/kvm is not usable.' \
+			'--insecure runs without the microVM (less isolation)'
 	fi
-	names+=(-o -name "$p")
-done
+	if [[ -t 0 ]]; then
+		for cmd in sleep stty; do
+			command -v "$cmd" >/dev/null || fatal "command not found: ${cmd@Q}"
+		done
+	fi
+	runtime=$(podman info --format '{{.Host.OCIRuntime.Version}}') || exit
+	if [[ $runtime != *+LIBKRUN* ]]; then
+		fatal 'crun has no libkrun.' \
+			'--insecure runs without the microVM (less isolation)'
+	fi
+fi
+
+if [[ ${ocicmd[0]} == docker ]] && command -v podman >/dev/null; then
+	if ! docker compose version >/dev/null 2>&1; then
+		PODMAN_COMPOSE_WARNING_LOGS=false podman compose version >/dev/null || exit
+		ocicmd=(podman compose)
+	fi
+else
+	PODMAN_COMPOSE_WARNING_LOGS=false "${ocicmd[@]}" version >/dev/null || exit
+fi
+mkdir -p -- "$notes" || exit
+
 mapfile -d '' paths < <(
-	find "$ws" -mindepth 1 \( "${names[@]:1}" \) -prune -print0
+	find "$workspace" -mindepth 1 \( "${names[@]:1}" \) -prune -print0
 ) || exit
 wait $! || exit
 
@@ -132,36 +249,36 @@ done
 override=$(mktemp) || exit
 trap 'rm -f "$override"' EXIT
 {
-	printf '%s\n' 'services:' '  claude:'
+	printf '%s\n' 'services:' "  $agent:" || exit
 	if ((krun)); then
 		printf '%s\n' \
 			'    annotations:' \
-			'      run.oci.handler: krun' \
-			"      krun.cpus: '$cpus'" \
-			"      krun.ram_mib: '$ram'"
+			"      krun.cpus: '${cpus:-2}'" \
+			"      krun.ram_mib: '${ram:-2048}'" \
+			'      run.oci.handler: krun' || exit
 	fi
-	printf '%s\n' '    environment:' "      OCIAGENT_KRUN: '$krun'"
+	printf '%s\n' '    environment:' "      OCIAGENT_KRUN: '$krun'" || exit
 	if ((${#paths[@]})); then
 		protected=
 		for p in "${paths[@]}"; do
-			protected+=:/$name${p#"$ws"}
+			protected+=:/$project${p#"$workspace"}
 		done
-		printf "      OCIAGENT_PROTECTED: '%s'\n" "${protected#:}"
-		printf '%s\n' '    volumes:'
+		printf "      OCIAGENT_PROTECTED: '%s'\n" "${protected#:}" || exit
+		printf '%s\n' '    volumes:' || exit
 		for p in "${paths[@]}"; do
 			printf '%s\n' \
 				'      - type: bind' \
 				"        source: '$p'" \
-				"        target: '/$name${p#"$ws"}'" \
-				'        read_only: true'
+				"        target: '/$project${p#"$workspace"}'" \
+				'        read_only: true' || exit
 		done
 	fi
 } >"$override" || exit
 
-files=(-f docker-compose.yml -f "$override")
 container=ociagent-$$
+files=(-f "$compose_file" -f "$override")
 
-# turn off icrnl on podman's container pty so enter reaches claude as \r
+# turn off icrnl on podman's container pty so enter reaches agent as \r
 if ((krun)) && [[ -t 0 ]]; then
 	{
 		for _ in {1..150}; do
@@ -176,5 +293,5 @@ if ((krun)) && [[ -t 0 ]]; then
 	} &
 fi
 
-WORKSPACE=$ws PROJECT=$name NOTES=./notes/$name \
-	"${ocicmd[@]}" "${files[@]}" run --rm --name "$container" claude "$@"
+NOTES=$notes PROJECT=$project WORKSPACE=$workspace \
+	"${ocicmd[@]}" "${files[@]}" run --rm --name "$container" "$agent" "$@"

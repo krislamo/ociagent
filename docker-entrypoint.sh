@@ -13,10 +13,11 @@ if ((EUID == 0)); then
 	if [[ -z $OCIAGENT_UID || -z $OCIAGENT_GID ]]; then
 		fatal 'OCIAGENT_UID and OCIAGENT_GID are not set'
 	fi
-	# remount ro so claude's sandbox see them as read-only
+	# Make protected mounts appear read-only inside the guest
 	for path in "${protected[@]}"; do
 		if ! mount --bind -o ro "$path" "$path"; then
-			echo "can't mount protected path read-only: ${path@Q}"
+			printf '%s: cannot mount protected path read-only: %s\n' \
+				"$prog" "${path@Q}" >&2
 		fi
 	done
 	exec setpriv --reuid="$OCIAGENT_UID" --regid="$OCIAGENT_GID" \

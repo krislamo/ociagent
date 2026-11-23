@@ -1,151 +1,184 @@
 # ociagent
 
-Claude Code in a Debian slim image under rootless Podman, running as user
-`claude`. The agent can write only to its own project. Paths that run code on
-the host and usually sit outside git history (`.git`, virtualenvs, etc.) are
-mounted read-only.
-
-By default, each session runs in a libkrun microVM with its own kernel. The
-container's files and mounts reach the guest over virtiofs, and the host keeps
-enforcing the read-only paths. `OCIAGENT_KRUN=0` runs a plain container instead.
+Run coding agents in a Debian OCI image under rootless Podman. The
+launcher mounts selected workspace paths read-only and runs each session in a
+libkrun microVM by default.
 
 ## Requirements
 
-Bash 4.4 or newer, AND Podman used through either:
+- Bash 4.4+
+- GNU coreutils and GNU findutils
+- Rootless Podman
+  - `podman-compose` OR
+  - Docker CLI and Compose plugin with the Podman socket
+- For microVMs, crun with libkrun
+  - `+LIBKRUN` in `podman info`
+  - read/write access to `/dev/kvm`
 
-- the docker CLI with the compose plugin, pointed at the Podman socket, i.e.,
-  `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock`
+## Quick start
 
-OR
+1. Build the agent images from your ociagent checkout
 
-- `podman compose` with `podman-compose` installed
+   With the Docker CLI connected to Podman, run
 
-The compose file uses Podman-only options:
+   ```sh
+   docker compose build
+   ```
 
-- `userns_mode: keep-id`
-- `unmask=/proc/*`
+   **OR** use Podman's Compose command
 
-The microVM needs crun built with libkrun (`podman info` shows `+LIBKRUN`) and a
-usable `/dev/kvm`.
+   ```sh
+   podman compose build
+   ```
 
-## .env config
+2. Symlink the checkout's executable into a local directory on your `PATH`
 
-| Variable                | Default                | Purpose                              |
-| ----------------------- | ---------------------- | ------------------------------------ |
-| `CONFIG`                | `./config`             | Claude's config and credentials      |
-| `CLAUDE_MD`             | `./CLAUDE.md`          | Claude's user CLAUDE.md              |
-| `MANAGED_SETTINGS_D`    | `./managed-settings.d` | Managed-settings drop-ins, read-only |
-| `OCIAGENT_PROTECT`      | see below              | Names mounted read-only              |
-| `TZ`                    | `America/New_York`     | Container time zone                  |
-| `OCIAGENT_UID`          | `1000`                 | Container UID, rebuild to change     |
-| `OCIAGENT_GID`          | `1000`                 | Container GID, rebuild to change     |
-| `OCIAGENT_KRUN`         | `1`                    | `0` runs without the microVM         |
-| `OCIAGENT_KRUN_CPUS`    | `2`                    | microVM vCPUs                        |
-| `OCIAGENT_KRUN_RAM_MIB` | `2048`                 | microVM RAM in MiB                   |
+   If `~/.local/bin` is on your `PATH`, run
 
-**Note:** `ociagent` sources `.env` as bash, so **quote values with spaces**:
-`OCIAGENT_PROTECT='.git .env'`. Left unquoted, the rest of the line runs as a
-command.
+   ```sh
+   ln -s "$PWD/ociagent" ~/.local/bin/ociagent
+   ```
 
-### CLAUDE.md
+   - `ociagent` follows it's symlink to the checkout for its configuration
 
-`CLAUDE.md` is mounted for the agent. To use your own without touching the
-tracked file, copy it to `CLAUDE.local.md` (gitignored), edit it, and point
-`.env` at it:
+3. Start a session from your project directory
 
-```text
-cp CLAUDE.md CLAUDE.local.md
-echo 'CLAUDE_MD=./CLAUDE.local.md' >> .env
-```
+   e.g.,
+   ```sh
+   ociagent -a claude
+   ```
 
-### Managed settings
+   **OR** create and use a workspace from your ociagent checkout, e.g.,
 
-The image ships `managed-settings.json`, which Claude can't override. It turns
-on the Bash sandbox and lets sandboxed commands write to `/notes`. To add
-host-local managed settings without a rebuild, put `*.json` files in
-`managed-settings.d/` (gitignored). They're merged on top of the base and take
-effect on the next launch.
+   ```sh
+   mkdir -p workspaces/myproject
+   ociagent -a codex -w workspaces/myproject
+   ```
 
-**Note:** _A drop-in can't remove base entries_
+## Options
 
-## Usage
+| Option                     | Behavior                                       |
+| -------------------------- | ---------------------------------------------- |
+| `-a`, `--agent`            | Select `claude` or `codex` (required)          |
+| `-w`, `--workspace PATH`   | Relative to current directory (default `.`)    |
+| `-n`, `--notes PATH`       | Mounts a separate directory at `/notes`        |
+| `-i`, `--insecure`         | Runs a plain container                         |
+| `-c`, `--cpus CPUS`        | MicroVM vCPUs (krun only, default `2`)         |
+| `-r`, `--ram MIB`          | MicroVM RAM in MiB (krun only, default `2048`) |
+| `-p`, `--protect PATTERNS` | Replaces the read-only name patterns           |
+| `-- AGENT_ARGS...`         | Passes subsequent arguments to the agent       |
+| `-h`, `--help`             | Prints usage                                   |
+| `-v`, `--version`          | Prints the launcher version                    |
 
-Build your `localhost/claude-code:latest` image:
+### Workspace and notes
 
-```text
-docker compose build
-```
+Workspaces inside the checkout must be subdirectories of `workspaces/`.
 
-OR
+Notes default to `notes/<workspace-name>` in the checkout, using the basename
+of the resolved workspace. Use `-n` to keep separate notes for workspaces
+with the same name.
 
-```text
-podman compose build
-```
+Relative `-n` paths resolve from the directory where you run `ociagent`.
+Notes inside the checkout must be subdirectories of `notes/`.
 
-### ociagent
+### Protected paths
 
-From the repo root, run a project in `./workspaces/<project>` at `/<project>`,
-with its notes in `./notes/<project>`:
-
-```text
-./ociagent myproject [claude args ... e.g., --resume <ID> ]
-```
-
-The path works too, so the name can be tab-completed:
-`./ociagent workspaces/myproject/`.
-
-Each project gets its own mount point, so Claude keeps separate memory and
-session history per project.
-
-These paths are mounted read-only inside the project:
+The default patterns match at any depth in the workspace.
 
 ```text
 .git .venv venv .vscode .idea .devcontainer .envrc *.code-workspace
 ```
 
-_Replace_ that list with a space-separated `OCIAGENT_PROTECT`, in the
-environment or (quoted) in `.env`:
+Pass `--protect` one quoted, space-separated list to replace the defaults.
 
-```text
-OCIAGENT_PROTECT='.git .env' ./ociagent myproject
+```sh
+ociagent -a claude -w ~/src/myrepo --protect '.git .env'
 ```
 
-The names match at any depth. `ociagent` refuses to launch if a match is a
-symlink, if its path contains `'`, `$`, a newline or a carriage return, or if
-the project can't be searched completely (e.g., an unreadable directory).
+## Configuration
 
-Limits of the protection:
+Compose reads `.env` in the checkout. Relative paths in the table resolve
+from that checkout.
 
-- Only in-scope paths that existed at launch are covered. A `.git` created
-  during the session is writable, and git on the host runs what its config
-  names: git hooks, `core.fsmonitor`
-- `config/` is shared by every project and is writable. Credentials, history and
-  memory of one project are readable from another
-- The container's network isn't restricted. Only sandboxed Bash commands go
-  through Claude Code's proxy
-- Run one session per project at a time. A running session can turn a nested
-  match into a symlink while a second launch is checking it
-- A match at the top of the project can't be moved. A nested one can be
-  sidestepped by renaming a directory above it, so treat nested protection as
-  best effort
-- `docker compose run --rm -e OCIAGENT_KRUN=0 claude` still works, but mounts
-  all of `./workspaces` at `/workspaces` without protections or the microVM
+| Variable                       | Default and purpose                        |
+| ------------------------------ | ------------------------------------------ |
+| `CONFIG`                       | `./config/claude` (config and credentials) |
+| `CLAUDE_MD`                    | `./claude/CLAUDE.md` (user instructions)   |
+| `MANAGED_SETTINGS_D`           | `./claude/managed-settings.d` (drop-ins)   |
+| `CODEX_CONFIG`                 | `./config/codex` (config and credentials)  |
+| `AGENTS_MD`                    | `./codex/AGENTS.md` (user instructions)    |
+| `TZ`                           | `America/New_York` (container time zone)   |
+| `OCIAGENT_UID`, `OCIAGENT_GID` | `1000` each (container UID and GID)        |
 
-### Update
+Rebuild after changing `OCIAGENT_UID` or `OCIAGENT_GID`.
 
-```text
+Claude enables its Bash sandbox. Read-only `*.json` drop-ins can add or
+override managed settings at launch. Codex allows `read-only` and
+`workspace-write` and defaults to `workspace-write`. Both allow sandboxed
+writes to `/notes` by default.
+
+### Override agent instructions
+
+For Claude, run this from the checkout
+
+```sh
+cp claude/CLAUDE.md claude/CLAUDE.local.md
+```
+
+In `.env`, set
+
+```dotenv
+CLAUDE_MD=./claude/CLAUDE.local.md
+```
+
+**OR** for Codex, run this from the checkout
+
+```sh
+cp codex/AGENTS.md codex/AGENTS.local.md
+```
+
+In `.env`, set
+
+```dotenv
+AGENTS_MD=./codex/AGENTS.local.md
+```
+
+Edit your local copy. Both local files are gitignored.
+
+## Protection limits
+
+- Read-only mounts cover paths found at launch. A `.git` created during a
+  session is writable and can configure hooks that host Git runs. Nested
+  mounts can be bypassed by renaming an ancestor. Run one session per
+  workspace at a time.
+  Launch fails if a protected path is a symlink, its path contains `'`,
+  `$`, `:`, a newline or a carriage return, or the workspace scan fails
+- The workspace outside protected mounts, notes, and agent config are writable.
+  Each agent's config, credentials and history are shared across its workspaces.
+  Container networking is unrestricted
+- Bare `docker compose run --rm -e OCIAGENT_KRUN=0 claude` mounts
+  `./workspaces` at `/workspaces` by default and skips launcher protections
+  and the microVM
+
+## Updates
+
+To upgrade Codex, change `CODEX_VERSION` in `codex/Dockerfile` before
+rebuilding.
+
+From the checkout, use the Docker CLI connected to Podman
+
+```sh
 docker pull debian:trixie-slim &&
 docker compose build --no-cache
 ```
 
-OR
+**OR** use Podman directly
 
-```text
+```sh
 podman pull debian:trixie-slim &&
 podman compose build --no-cache
 ```
 
 ## License
 
-This project is released under the 0BSD license, which allows unrestricted use,
-modification, and distribution.
+[0BSD](LICENSE)

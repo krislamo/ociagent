@@ -1,6 +1,10 @@
 /.claude/
 /.env
+/AGENTS.local.md
 /CLAUDE.local.md
+/claude/CLAUDE.local.md
+/codex/AGENTS.local.md
 /config/
+/managed-settings.d/
 /notes/
 /workspaces/

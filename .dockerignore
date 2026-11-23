@@ -1,4 +1,10 @@
 *
-!claude-code.sources
-!managed-settings.json
-!ociagent-init
+!claude/
+claude/*
+!claude/claude-code.sources
+!claude/managed-settings.json
+!codex/
+codex/*
+!codex/managed_config.toml
+!codex/requirements.toml
+!docker-entrypoint.sh

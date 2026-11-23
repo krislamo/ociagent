@@ -2,10 +2,11 @@ services:
   claude:
     build:
       context: .
+      dockerfile: claude/Dockerfile
       args:
         UID: ${OCIAGENT_UID:-1000}
         GID: ${OCIAGENT_GID:-1000}
-    image: localhost/claude-code:latest
+    image: localhost/claude:latest
     userns_mode: keep-id:uid=${OCIAGENT_UID:-1000},gid=${OCIAGENT_GID:-1000}
     cap_drop:
       - ALL
@@ -19,8 +20,56 @@ services:
       TZ: ${TZ:-America/New_York}
       DISABLE_AUTOUPDATER: "1"
     volumes:
-      - ${WORKSPACE:-./workspaces}:/${PROJECT:-workspaces}
-      - ${NOTES:-./notes}:/notes
-      - ${CONFIG:-./config}:/home/claude/.config/claude
-      - ${CLAUDE_MD:-./CLAUDE.md}:/home/claude/.config/claude/CLAUDE.md:ro
-      - ${MANAGED_SETTINGS_D:-./managed-settings.d}:/etc/claude-code/managed-settings.d:ro
+      - type: bind
+        source: "${WORKSPACE:-./workspaces}"
+        target: "/${PROJECT:-workspaces}"
+      - type: bind
+        source: "${NOTES:-./notes}"
+        target: /notes
+      - ${CONFIG:-./config/claude}:/home/claude/.config/claude
+      - type: bind
+        source: "${CLAUDE_MD:-./claude/CLAUDE.md}"
+        target: /home/claude/.config/claude/CLAUDE.md
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MANAGED_SETTINGS_D:-./claude/managed-settings.d}"
+        target: /etc/claude-code/managed-settings.d
+        read_only: true
+        bind:
+          create_host_path: false
+
+  codex:
+    build:
+      context: .
+      dockerfile: codex/Dockerfile
+      args:
+        UID: ${OCIAGENT_UID:-1000}
+        GID: ${OCIAGENT_GID:-1000}
+    image: localhost/codex:latest
+    userns_mode: keep-id:uid=${OCIAGENT_UID:-1000},gid=${OCIAGENT_GID:-1000}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+      - unmask=/proc/*
+    stdin_open: true
+    tty: true
+    working_dir: /${PROJECT:-workspaces}
+    environment:
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      - type: bind
+        source: "${WORKSPACE:-./workspaces}"
+        target: "/${PROJECT:-workspaces}"
+      - type: bind
+        source: "${NOTES:-./notes}"
+        target: /notes
+      - ${CODEX_CONFIG:-./config/codex}:/home/codex/.codex
+      - type: bind
+        source: "${AGENTS_MD:-./codex/AGENTS.md}"
+        target: /home/codex/.codex/AGENTS.md
+        read_only: true
+        bind:
+          create_host_path: false
